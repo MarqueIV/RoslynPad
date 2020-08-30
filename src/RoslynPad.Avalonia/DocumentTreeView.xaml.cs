@@ -1,6 +1,7 @@
 ﻿using System;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using RoslynPad.UI;
 
@@ -20,25 +21,25 @@ namespace RoslynPad
             treeView.ItemContainerGenerator.Dematerialized += ItemContainerGenerator_Dematerialized;
         }
 
-        private void ItemContainerGenerator_Materialized(object sender, Avalonia.Controls.Generators.ItemContainerEventArgs e)
+        private void ItemContainerGenerator_Materialized(object? sender, Avalonia.Controls.Generators.ItemContainerEventArgs e)
         {
             foreach (var item in e.Containers)
             {
                 if (item.ContainerControl is TreeViewItem treeViewItem)
                 {
-                    treeViewItem.PointerPressed += OnDocumentClick;
+                    treeViewItem.DoubleTapped += OnDocumentClick;
                     treeViewItem.KeyDown += OnDocumentKeyDown;
                 }
             }
         }
 
-        private void ItemContainerGenerator_Dematerialized(object sender, Avalonia.Controls.Generators.ItemContainerEventArgs e)
+        private void ItemContainerGenerator_Dematerialized(object? sender, Avalonia.Controls.Generators.ItemContainerEventArgs e)
         {
             foreach (var item in e.Containers)
             {
                 if (item.ContainerControl is TreeViewItem treeViewItem)
                 {
-                    treeViewItem.PointerPressed -= OnDocumentClick;
+                    treeViewItem.DoubleTapped -= OnDocumentClick;
                     treeViewItem.KeyDown -= OnDocumentKeyDown;
                 }
             }
@@ -50,15 +51,12 @@ namespace RoslynPad
         }
 
 
-        private void OnDocumentClick(object sender, PointerPressedEventArgs e)
+        private void OnDocumentClick(object? sender, RoutedEventArgs e)
         {
-            if (e.MouseButton == MouseButton.Left && e.ClickCount >= 2)
-            {
-                OpenDocument(e.Source);
-            }
+            OpenDocument(e.Source);
         }
 
-        private void OnDocumentKeyDown(object sender, KeyEventArgs e)
+        private void OnDocumentKeyDown(object? sender, KeyEventArgs e)
         {
             if (e.Key == Key.Enter)
             {

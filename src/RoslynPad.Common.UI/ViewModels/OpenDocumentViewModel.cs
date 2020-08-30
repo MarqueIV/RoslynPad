@@ -9,13 +9,14 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Options;
 using Microsoft.CodeAnalysis.Rename;
 using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.CodeAnalysis.Text;
 using NuGet.Versioning;
-using RoslynPad.Hosting;
+using RoslynPad.Build;
+using RoslynPad.NuGet;
 using RoslynPad.Roslyn.Rename;
 using RoslynPad.Runtime;
 using RoslynPad.Utilities;
@@ -30,43 +31,39 @@ namespace RoslynPad.UI
         private readonly IServiceProvider _serviceProvider;
         private readonly IAppDispatcher _dispatcher;
         private readonly ITelemetryProvider _telemetryProvider;
-        private IExecutionHost? _executionHost;
-        private ObservableCollection<IResultObject> _results;
-        private CancellationTokenSource _cts;
+        private readonly IPlatformsFactory _platformsFactory;
+        private readonly IExecutionHost _executionHost;
+        private readonly ObservableCollection<IResultObject> _results;
+        private readonly ExecutionHostParameters _executionHostParameters;
+        private CancellationTokenSource? _restoreCts;
+        private CancellationTokenSource? _runCts;
         private bool _isRunning;
         private bool _isDirty;
-        private ExecutionPlatform _platform;
+        private ExecutionPlatform? _platform;
         private bool _isSaving;
-        private IDisposable _viewDisposable;
-        private Action<ExceptionResultObject?> _onError;
-        private Func<TextSpan> _getSelection;
-        private string _ilText;
+        private IDisposable? _viewDisposable;
+        private Action<ExceptionResultObject?>? _onError;
+        private Func<TextSpan>? _getSelection;
+        private string? _ilText;
         private bool _isInitialized;
         private bool _isLiveMode;
-        private Timer _liveModeTimer;
-        private ExecutionHostParameters _executionHostParameters;
-        private PlatformVersion _platformVersion;
+        private Timer? _liveModeTimer;
         private DocumentViewModel? _document;
+        private bool _isRestoring;
+        private IReadOnlyList<ExecutionPlatform>? _availablePlatforms;
+        private DocumentId? _documentId;
+        private bool _restoreSuccessful;
+        private double? _reportedProgress;
 
         public string Id { get; }
         public string BuildPath { get; }
 
         public string WorkingDirectory => Document != null
-            ? Path.GetDirectoryName(Document.Path)
+            ? Path.GetDirectoryName(Document.Path)!
             : MainViewModel.DocumentRoot.Path;
 
         public IEnumerable<object> Results => _results;
-
-        internal ObservableCollection<IResultObject> ResultsInternal
-        {
-            // ReSharper disable once UnusedMember.Local
-            get => _results;
-            private set
-            {
-                _results = value;
-                OnPropertyChanged(nameof(Results));
-            }
-        }
+        internal IEnumerable<IResultObject> ResultsInternal => _results;
 
         public IDelegateCommand ToggleLiveModeCommand { get; }
 
@@ -81,7 +78,7 @@ namespace RoslynPad.UI
                 if (value)
                 {
                     // ReSharper disable once UnusedVariable
-                    var task = Run();
+                    _ = Run();
 
                     if (_liveModeTimer == null)
                     {
@@ -114,46 +111,34 @@ namespace RoslynPad.UI
 
         public string ILText
         {
-            get => _ilText;
+            get => _ilText ?? string.Empty;
             private set => SetProperty(ref _ilText, value);
         }
 
         [ImportingConstructor]
-#pragma warning disable CS8618 // Non-nullable field is uninitialized.
         public OpenDocumentViewModel(IServiceProvider serviceProvider, MainViewModelBase mainViewModel, ICommandProvider commands, IAppDispatcher appDispatcher, ITelemetryProvider telemetryProvider)
-#pragma warning restore CS8618 // Non-nullable field is uninitialized.
         {
-            Id = Guid.NewGuid().ToString();
-            BuildPath = Path.Combine(Path.GetTempPath(), "RoslynPad", "Build", Id);
-            var nuGetBuildPath = Path.Combine(BuildPath, "nuget");
+            Id = Guid.NewGuid().ToString("n");
+            BuildPath = Path.Combine(Path.GetTempPath(), "roslynpad", "build", Id);
+            Directory.CreateDirectory(BuildPath);
 
             _telemetryProvider = telemetryProvider;
-
-            try
-            {
-                Directory.CreateDirectory(nuGetBuildPath);
-            }
-            catch (Exception ex)
-            {
-                _telemetryProvider.ReportError(ex);
-            }
-
+            _platformsFactory = serviceProvider.GetService<IPlatformsFactory>();
             _serviceProvider = serviceProvider;
+            _results = new ObservableCollection<IResultObject>();
+
             MainViewModel = mainViewModel;
             CommandProvider = commands;
 
             NuGet = serviceProvider.GetService<NuGetDocumentViewModel>();
-            NuGet.Id = Id;
-            NuGet.BuildPath = nuGetBuildPath;
-            NuGet.RestoreCompleted += OnNuGetRestoreCompleted;
 
+            _restoreSuccessful = true; // initially set to true so we can immediately start running and wait for restore
             _dispatcher = appDispatcher;
-            AvailablePlatforms = serviceProvider.GetService<IPlatformsFactory>()
-                .GetExecutionPlatforms().ToImmutableArray();
+            _platformsFactory.Changed += InitializePlatforms;
 
             OpenBuildPathCommand = commands.Create(() => OpenBuildPath());
             SaveCommand = commands.CreateAsync(() => Save(promptSave: false));
-            RunCommand = commands.CreateAsync(Run, () => !IsRunning && Platform != null);
+            RunCommand = commands.CreateAsync(Run, () => !IsRunning && RestoreSuccessful && Platform != null);
             RestartHostCommand = commands.CreateAsync(RestartHost, () => Platform != null);
             FormatDocumentCommand = commands.CreateAsync(FormatDocument);
             CommentSelectionCommand = commands.CreateAsync(() => CommentUncommentSelection(CommentAction.Comment));
@@ -162,57 +147,94 @@ namespace RoslynPad.UI
             ToggleLiveModeCommand = commands.Create(() => IsLiveMode = !IsLiveMode);
 
             ILText = DefaultILText;
+
+            var roslynHost = MainViewModel.RoslynHost;
+
+            _executionHostParameters = new ExecutionHostParameters(
+                BuildPath,
+                serviceProvider.GetService<NuGetViewModel>().ConfigPath,
+                roslynHost.DefaultImports,
+                roslynHost.DisabledDiagnostics,
+                WorkingDirectory);
+            _executionHost = new ExecutionHost(_executionHostParameters, roslynHost);
+
+            _executionHost.Dumped += ExecutionHostOnDump;
+            _executionHost.Error += ExecutionHostOnError;
+            _executionHost.ReadInput += ExecutionHostOnInputRequest;
+            _executionHost.CompilationErrors += ExecutionHostOnCompilationErrors;
+            _executionHost.Disassembled += ExecutionHostOnDisassembled;
+            _executionHost.RestoreStarted += OnRestoreStarted;
+            _executionHost.RestoreCompleted += OnRestoreCompleted;
+            _executionHost.RestoreMessage += AddResult;
+            _executionHost.ProgressChanged += p => ReportedProgress = p.Progress;
+
+            InitializePlatforms();
         }
 
-        private void OnNuGetRestoreCompleted(NuGetRestoreResult restoreResult)
+        private void InitializePlatforms()
         {
-            var host = MainViewModel.RoslynHost;
-            var document = host.GetDocument(DocumentId);
-            if (document == null)
-            {
-                return;
-            }
-
-            var project = document.Project;
-
-            bool useDesktopReferences = Platform?.IsDesktop == true;
-
-            var nugetReferences = restoreResult.CompileReferences.Select(x => host.CreateMetadataReference(x));
-            var references = useDesktopReferences ? MainViewModel.DesktopReferences.AddRange(nugetReferences) : nugetReferences;
-            references = references.Concat(MainViewModel.RoslynHost.DefaultReferences);
-
-            project = project.WithMetadataReferences(references);
-            if (restoreResult.Analyzers.Count > 0)
-            {
-                project = project.WithAnalyzerReferences(GetAnalyzerReferences(restoreResult.Analyzers));
-            }
-
-            document = project.GetDocument(DocumentId);
-
-            host.UpdateDocument(document);
-            OnDocumentUpdated();
-
-            // for desktop, add System*, including facade assemblies
-            _executionHostParameters.FrameworkReferences = useDesktopReferences ? MainViewModel.DesktopReferences : ImmutableArray<MetadataReference>.Empty;
-            // compile-time references from NuGet
-            _executionHostParameters.NuGetCompileReferences = GetReferences(restoreResult.CompileReferences, host);
-            // runtime references from NuGet
-            _executionHostParameters.NuGetRuntimeReferences = GetReferences(restoreResult.RuntimeReferences, host);
-            // reference directives & default references
-            _executionHostParameters.DirectReferences = NuGet.LocalLibraryPaths;
-
-            var task = _executionHost?.Update(_executionHostParameters);
-
-            ImmutableArray<string> GetReferences(IEnumerable<string> references, Roslyn.RoslynHost host)
-            {
-                return GetReferencePaths(host.DefaultReferences).Concat(references).ToImmutableArray();
-            }
+            AvailablePlatforms = _platformsFactory.GetExecutionPlatforms().ToImmutableArray();
+            _executionHost.DotNetExecutable = _platformsFactory.DotNetExecutable;
         }
 
-        private IEnumerable<AnalyzerReference> GetAnalyzerReferences(IList<string> analyzers)
+        private void OnRestoreStarted()
         {
-            var loader = MainViewModel.RoslynHost.GetService<IAnalyzerAssemblyLoader>();
-            return analyzers.Select(a => new AnalyzerFileReference(a, loader));
+            IsRestoring = true;
+        }
+
+        private void OnRestoreCompleted(RestoreResult restoreResult)
+        {
+            IsRestoring = false;
+
+            ClearResults(t => t is RestoreResultObject);
+
+            if (restoreResult.Success)
+            {
+                var host = MainViewModel.RoslynHost;
+                var document = host.GetDocument(DocumentId);
+                if (document == null)
+                {
+                    return;
+                }
+
+                var project = document.Project;
+
+                project = project
+                    .WithMetadataReferences(_executionHost.MetadataReferences)
+                    .WithAnalyzerReferences(_executionHost.Analyzers);
+
+                document = project.GetDocument(DocumentId);
+
+                host.UpdateDocument(document!);
+                OnDocumentUpdated();
+            }
+            else
+            {
+                foreach (var error in restoreResult.Errors)
+                {
+                    AddResult(new RestoreResultObject(error, "Error"));
+                }
+            }
+
+            RestoreSuccessful = restoreResult.Success;
+        }
+
+        public bool IsRestoring
+        {
+            get => _isRestoring;
+            private set => SetProperty(ref _isRestoring, value);
+        }
+
+        public bool RestoreSuccessful
+        {
+            get => _restoreSuccessful;
+            private set
+            {
+                if (SetProperty(ref _restoreSuccessful, value))
+                {
+                    _dispatcher.InvokeAsync(() => RunCommand.RaiseCanExecuteChanged());
+                }
+            }
         }
 
         private void OnDocumentUpdated()
@@ -220,11 +242,11 @@ namespace RoslynPad.UI
             DocumentUpdated?.Invoke(this, EventArgs.Empty);
         }
 
-        public event EventHandler DocumentUpdated;
+        public event EventHandler? DocumentUpdated;
 
-        public event Action ReadInput;
+        public event Action? ReadInput;
 
-        public event Action ResultsAvailable;
+        public event Action? ResultsAvailable;
 
         private void AddResult(object o)
         {
@@ -235,7 +257,7 @@ namespace RoslynPad.UI
         {
             _dispatcher.InvokeAsync(() =>
             {
-                ResultsInternal?.Add(o);
+                _results.Add(o);
                 ResultsAvailable?.Invoke();
             }, AppDispatcherPriority.Low);
         }
@@ -260,7 +282,7 @@ namespace RoslynPad.UI
                 _onError?.Invoke(errorResult);
                 if (errorResult != null)
                 {
-                    ResultsInternal.Add(errorResult);
+                    _results.Add(errorResult);
 
                     ResultsAvailable?.Invoke();
                 }
@@ -273,7 +295,7 @@ namespace RoslynPad.UI
             {
                 foreach (var error in errors)
                 {
-                    ResultsInternal.Add(error);
+                    _results.Add(error);
                 }
 
                 ResultsAvailable?.Invoke();
@@ -291,44 +313,24 @@ namespace RoslynPad.UI
 
             IsDirty = document?.IsAutoSave == true;
 
-            var roslynHost = MainViewModel.RoslynHost;
-
-            _executionHostParameters = new ExecutionHostParameters(
-                ImmutableArray<string>.Empty, // will be updated during NuGet restore
-                ImmutableArray<string>.Empty,
-                ImmutableArray<string>.Empty,
-                ImmutableArray<MetadataReference>.Empty,
-                roslynHost.DefaultImports,
-                roslynHost.DisabledDiagnostics,
-                WorkingDirectory,
-                MainViewModel.NuGet.GlobalPackageFolder);
-            _executionHost = new AssemblyExecutionHost(_executionHostParameters, BuildPath, Document?.Name ?? "Untitled");
-
-            _executionHost.Dumped += ExecutionHostOnDump;
-            _executionHost.Error += ExecutionHostOnError;
-            _executionHost.ReadInput += ExecutionHostOnInputRequest;
-            _executionHost.CompilationErrors += ExecutionHostOnCompilationErrors;
-            _executionHost.Disassembled += ExecutionHostOnDisassembled;
-
-            Platform = AvailablePlatforms.FirstOrDefault(p => p.Name == MainViewModel.Settings.DefaultPlatformName) ??
-                       AvailablePlatforms.FirstOrDefault();
+            _executionHost.Name = Document?.Name ?? "Untitled";
         }
 
         public void SendInput(string input)
         {
-            var task = _executionHost?.SendInput(input);
+            _ = _executionHost?.SendInputAsync(input);
         }
 
         private IEnumerable<string> GetReferencePaths(IEnumerable<MetadataReference> references)
         {
-            return references.OfType<PortableExecutableReference>().Select(x => x.FilePath);
+            return references.OfType<PortableExecutableReference>().Select(x => x.FilePath).Where(x => x != null)!;
         }
 
         private async Task RenameSymbol()
         {
             var host = MainViewModel.RoslynHost;
             var document = host.GetDocument(DocumentId);
-            if (document == null)
+            if (document == null || _getSelection == null)
             {
                 return;
             }
@@ -341,10 +343,11 @@ namespace RoslynPad.UI
             await dialog.ShowAsync();
             if (dialog.ShouldRename)
             {
-                var newSolution = await Renamer.RenameSymbolAsync(document.Project.Solution, symbol, dialog.SymbolName, null).ConfigureAwait(true);
+                var newSolution = await Renamer.RenameSymbolAsync(document.Project.Solution, symbol, dialog.SymbolName ?? string.Empty,
+                    document.Project.Solution.Options).ConfigureAwait(true);
                 var newDocument = newSolution.GetDocument(DocumentId);
                 // TODO: possibly update entire solution
-                host.UpdateDocument(newDocument);
+                host.UpdateDocument(newDocument!);
             }
             OnEditorFocus();
         }
@@ -365,7 +368,13 @@ namespace RoslynPad.UI
                 return;
             }
 
+            if (_getSelection == null)
+            {
+                return;
+            }
+
             var selection = _getSelection();
+
             var documentText = await document.GetTextAsync().ConfigureAwait(false);
             var changes = new List<TextChange>();
             var lines = documentText.Lines.SkipWhile(x => !x.Span.IntersectsWith(selection))
@@ -398,7 +407,7 @@ namespace RoslynPad.UI
             if (changes.Count == 0) return;
 
             MainViewModel.RoslynHost.UpdateDocument(document.WithText(documentText.WithChanges(changes)));
-            if (action == CommentAction.Uncomment)
+            if (action == CommentAction.Uncomment && MainViewModel.Settings.FormatDocumentOnComment)
             {
                 await FormatDocument().ConfigureAwait(false);
             }
@@ -411,48 +420,29 @@ namespace RoslynPad.UI
             MainViewModel.RoslynHost.UpdateDocument(formattedDocument);
         }
 
-        public IReadOnlyList<ExecutionPlatform> AvailablePlatforms { get; }
+        public IReadOnlyList<ExecutionPlatform> AvailablePlatforms
+        {
+            get => _availablePlatforms ?? throw new ArgumentNullException(nameof(_availablePlatforms));
+            private set => SetProperty(ref _availablePlatforms, value);
+        }
 
-        public ExecutionPlatform Platform
+        public ExecutionPlatform? Platform
         {
             get => _platform;
             set
             {
-                if (_executionHost == null || value == null) throw new InvalidOperationException();
+                if (value == null) throw new InvalidOperationException();
 
                 if (SetProperty(ref _platform, value))
                 {
                     _executionHost.Platform = value;
-                    PlatformVersion = value.Versions.FirstOrDefault(p => p.FrameworkVersion.IndexOf("-", StringComparison.Ordinal) < 0) ??
-                        value.Versions.FirstOrDefault();
 
-                    if (_isInitialized && !value.HasVersions)
+                    RunCommand.RaiseCanExecuteChanged();
+                    RestartHostCommand.RaiseCanExecuteChanged();
+
+                    if (_isInitialized)
                     {
-                        NuGet.SetTargetFramework(value.TargetFrameworkMoniker);
-                        RestartHostCommand?.Execute();
-                    }
-                }
-            }
-        }
-
-        public PlatformVersion PlatformVersion
-        {
-            get => _platformVersion;
-            set
-            {
-                if (_executionHost == null) throw new InvalidOperationException();
-
-                if (SetProperty(ref _platformVersion, value))
-                {
-                    if (value != null)
-                    {
-                        _executionHost.PlatformVersion = value;
-
-                        if (_isInitialized)
-                        {
-                            NuGet.SetTargetFramework(value.TargetFrameworkMoniker, value.FrameworkVersion);
-                            RestartHostCommand?.Execute();
-                        }
+                        RestartHostCommand.Execute();
                     }
                 }
             }
@@ -463,7 +453,7 @@ namespace RoslynPad.UI
             Reset();
             try
             {
-                await Task.Run(() => _executionHost?.ResetAsync()).ConfigureAwait(false);
+                await Task.Run(() => _executionHost?.TerminateAsync()).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -485,7 +475,9 @@ namespace RoslynPad.UI
         {
             if (!IsDirty) return;
 
-            if (Document == null)
+            var document = Document;
+
+            if (document == null)
             {
                 var index = 1;
                 string path;
@@ -496,8 +488,10 @@ namespace RoslynPad.UI
                 }
                 while (File.Exists(path));
 
-                Document = DocumentViewModel.FromPath(path);
+                document = DocumentViewModel.FromPath(path);
             }
+
+            Document = document;
 
             await SaveDocument(Document.GetAutoSavePath()).ConfigureAwait(false);
         }
@@ -572,7 +566,7 @@ namespace RoslynPad.UI
 
         private async Task SaveDocument(string path)
         {
-            if (DocumentId == null) return;
+            if (!_isInitialized) return;
 
             var document = MainViewModel.RoslynHost.GetDocument(DocumentId);
             if (document == null)
@@ -581,15 +575,15 @@ namespace RoslynPad.UI
             }
 
             var text = await document.GetTextAsync().ConfigureAwait(false);
-            using (var writer = File.CreateText(path))
+
+            using var writer = File.CreateText(path);
+            for (int lineIndex = 0; lineIndex < text.Lines.Count - 1; ++lineIndex)
             {
-                for (int lineIndex = 0; lineIndex < text.Lines.Count - 1; ++lineIndex)
-                {
-                    var lineText = text.Lines[lineIndex].ToString();
-                    await writer.WriteLineAsync(lineText).ConfigureAwait(false);
-                }
-                await writer.WriteAsync(text.Lines[text.Lines.Count - 1].ToString()).ConfigureAwait(false);
+                var lineText = text.Lines[lineIndex].ToString();
+                await writer.WriteLineAsync(lineText).ConfigureAwait(false);
             }
+
+            await writer.WriteAsync(text.Lines[text.Lines.Count - 1].ToString()).ConfigureAwait(false);
         }
 
         internal void Initialize(DocumentId documentId,
@@ -602,20 +596,19 @@ namespace RoslynPad.UI
             DocumentId = documentId;
             _isInitialized = true;
 
-            if (PlatformVersion != null)
-            {
-                NuGet.SetTargetFramework(PlatformVersion.TargetFrameworkMoniker, PlatformVersion.FrameworkVersion);
-            }
-            else
-            {
-                NuGet.SetTargetFramework(Platform.TargetFrameworkMoniker);
-            }
+            Platform = AvailablePlatforms.FirstOrDefault(p => p.Name == MainViewModel.Settings.DefaultPlatformName) ??
+                       AvailablePlatforms.FirstOrDefault();
 
-            var task = UpdatePackages();
+            UpdatePackages();
+
             RestartHostCommand?.Execute();
         }
 
-        public DocumentId DocumentId { get; private set; }
+        public DocumentId DocumentId
+        {
+            get => _documentId ?? throw new ArgumentNullException(nameof(_documentId));
+            private set => _documentId = value;
+        }
 
         public MainViewModelBase MainViewModel { get; }
         public ICommandProvider CommandProvider { get; }
@@ -642,7 +635,8 @@ namespace RoslynPad.UI
 
         public bool IsRunning
         {
-            get => _isRunning; private set
+            get => _isRunning;
+            private set
             {
                 if (SetProperty(ref _isRunning, value))
                 {
@@ -654,6 +648,8 @@ namespace RoslynPad.UI
         private async Task Run()
         {
             if (IsRunning) return;
+
+            ReportedProgress = null;
 
             Reset();
 
@@ -668,14 +664,17 @@ namespace RoslynPad.UI
                 ILText = DefaultILText;
             }
 
-            await NuGet.RestoreTask.ConfigureAwait(true);
-
-            var cancellationToken = _cts.Token;
+            var cancellationToken = _runCts!.Token;
             try
             {
                 var code = await GetCode(cancellationToken).ConfigureAwait(true);
                 if (_executionHost != null)
                 {
+                    // Make sure the execution working directory matches the current script path
+                    // which may have changed since we loaded.
+                    if (_executionHostParameters.WorkingDirectory != WorkingDirectory)
+                        _executionHostParameters.WorkingDirectory = WorkingDirectory;
+
                     await _executionHost.ExecuteAsync(code, ShowIL, OptimizationLevel).ConfigureAwait(true);
                 }
             }
@@ -683,7 +682,7 @@ namespace RoslynPad.UI
             {
                 foreach (var diagnostic in ex.Diagnostics)
                 {
-                    ResultsInternal?.Add(ResultObject.Create(diagnostic, DumpQuotas.Default));
+                    _results.Add(ResultObject.Create(diagnostic, DumpQuotas.Default));
                 }
             }
             catch (Exception ex)
@@ -693,58 +692,81 @@ namespace RoslynPad.UI
             finally
             {
                 SetIsRunning(false);
+                ReportedProgress = null;
             }
         }
 
         private void StartExec()
         {
-            ResultsInternal = new ObservableCollection<IResultObject>();
+            ClearResults(t => !(t is RestoreResultObject));
+
             _onError?.Invoke(null);
+        }
+
+        private void ClearResults(Func<IResultObject, bool> filter)
+        {
+            _dispatcher.InvokeAsync(() =>
+            {
+                foreach (var result in _results.Where(filter).ToArray())
+                {
+                    _results.Remove(result);
+                }
+            });
         }
 
         private OptimizationLevel OptimizationLevel => MainViewModel.Settings.OptimizeCompilation ? OptimizationLevel.Release : OptimizationLevel.Debug;
 
-        private async Task UpdatePackages()
+        private void UpdatePackages()
         {
-            var document = MainViewModel.RoslynHost.GetDocument(DocumentId);
-            if (document == null)
-            {
-                return;
-            }
+            _restoreCts?.Cancel();
+            _restoreCts = new CancellationTokenSource();
+            _ = UpdatePackagesAsync(_restoreCts.Token);
 
-            var syntaxRoot = await document.GetSyntaxRootAsync().ConfigureAwait(true);
-            var libraries = ParseReferences(syntaxRoot);
-
-            var defaultReferences = MainViewModel.RoslynHost.DefaultReferences;
-            if (defaultReferences.Length > 0)
+            async Task UpdatePackagesAsync(CancellationToken cancellationToken)
             {
-                if (libraries == null)
+                var document = MainViewModel.RoslynHost.GetDocument(DocumentId);
+                if (document == null)
                 {
-                    libraries = new List<LibraryRef>();
+                    return;
                 }
 
-                libraries.AddRange(GetReferencePaths(defaultReferences).Select(p => new LibraryRef(p)));
-            }
+                var syntaxRoot = await document.GetSyntaxRootAsync(cancellationToken).ConfigureAwait(false);
+                var libraries = ParseReferences(syntaxRoot!);
 
-            NuGet.UpdateLibraries((IReadOnlyList<LibraryRef>?)libraries ?? Array.Empty<LibraryRef>());
+                var defaultReferences = MainViewModel.RoslynHost.DefaultReferences;
+                if (defaultReferences.Length > 0)
+                {
+                    libraries.AddRange(GetReferencePaths(defaultReferences).Select(p => LibraryRef.Reference(p)));
+                }
+
+                _executionHost.UpdateLibraries(libraries);
+            }
         }
 
-        private List<LibraryRef>? ParseReferences(SyntaxNode syntaxRoot)
+        private List<LibraryRef> ParseReferences(SyntaxNode syntaxRoot)
         {
             const string NuGetPrefix = "nuget:";
             const string LegacyNuGetPrefix = "$NuGet\\";
+            const string FxPrefix = "framework:";
+
+            var libraries = new List<LibraryRef>();
 
             if (!(syntaxRoot is Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax compilation))
             {
-                return null;
+                return libraries;
             }
-
-            List<LibraryRef>? libraries = null;
 
             foreach (var directive in compilation.GetReferenceDirectives())
             {
                 var value = directive.File.ValueText;
                 string? id, version;
+
+                if (HasPrefix(FxPrefix, value))
+                {
+                    libraries.Add(LibraryRef.FrameworkReference(
+                        value.Substring(FxPrefix.Length, value.Length - FxPrefix.Length)));
+                    continue;
+                }
 
                 if (HasPrefix(NuGetPrefix, value))
                 {
@@ -760,11 +782,7 @@ namespace RoslynPad.UI
                 }
                 else
                 {
-                    if (IsLocalReference(value))
-                    {
-                        if (libraries == null) libraries = new List<LibraryRef>();
-                        libraries.Add(new LibraryRef(value));
-                    }
+                    libraries.Add(LibraryRef.Reference(value));
 
                     continue;
                 }
@@ -779,21 +797,20 @@ namespace RoslynPad.UI
                     continue;
                 }
 
-                if (libraries == null) libraries = new List<LibraryRef>();
-                libraries.Add(new LibraryRef(id, versionRange));
+                libraries.Add(LibraryRef.PackageReference(id, version ?? string.Empty));
             }
 
             return libraries;
 
             // local functions
 
-            bool HasPrefix(string prefix, string value)
+            static bool HasPrefix(string prefix, string value)
             {
                 return value.Length > prefix.Length &&
                        value.StartsWith(prefix, StringComparison.InvariantCultureIgnoreCase);
             }
 
-            (string id, string version) ParseNuGetReference(string prefix, string value)
+            static (string id, string version) ParseNuGetReference(string prefix, string value)
             {
                 string id, version;
 
@@ -812,7 +829,7 @@ namespace RoslynPad.UI
                 return (id, version);
             }
 
-            (string? id, string? version) ParseLegacyNuGetReference(string value)
+            static (string? id, string? version) ParseLegacyNuGetReference(string value)
             {
                 var split = value.Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
                 if (split.Length >= 3)
@@ -821,20 +838,6 @@ namespace RoslynPad.UI
                 }
 
                 return (null, null);
-            }
-
-            bool IsLocalReference(string path)
-            {
-                switch (Path.GetExtension(path)?.ToLowerInvariant())
-                {
-                    // add a "project" reference if it's not a GAC reference
-                    case ".dll":
-                    case ".exe":
-                    case ".winmd":
-                        return true;
-                }
-
-                return false;
             }
         }
 
@@ -852,12 +855,12 @@ namespace RoslynPad.UI
 
         private void Reset()
         {
-            if (_cts != null)
+            if (_runCts != null)
             {
-                _cts.Cancel();
-                _cts.Dispose();
+                _runCts.Cancel();
+                _runCts.Dispose();
             }
-            _cts = new CancellationTokenSource();
+            _runCts = new CancellationTokenSource();
         }
 
         public async Task<string> LoadText()
@@ -866,17 +869,14 @@ namespace RoslynPad.UI
             {
                 return string.Empty;
             }
-            using (var fileStream = File.OpenText(Document.Path))
-            {
-                return await fileStream.ReadToEndAsync().ConfigureAwait(false);
-            }
+
+            using var fileStream = File.OpenText(Document.Path);
+            return await fileStream.ReadToEndAsync().ConfigureAwait(false);
         }
 
         public void Close()
         {
             _viewDisposable?.Dispose();
-            _executionHost?.Dispose();
-            _executionHost = null;
         }
 
         public bool IsDirty
@@ -885,9 +885,24 @@ namespace RoslynPad.UI
             private set => SetProperty(ref _isDirty, value);
         }
 
+        public double? ReportedProgress
+        {
+            get => _reportedProgress;
+            private set
+            {
+                if (_reportedProgress != value)
+                {
+                    SetProperty(ref _reportedProgress, value);
+                    OnPropertyChanged(nameof(HasReportedProgress));
+                }
+            }
+        }
+
+        public bool HasReportedProgress => ReportedProgress.HasValue;
+
         public bool ShowIL { get; set; }
 
-        public event EventHandler EditorFocus;
+        public event EventHandler? EditorFocus;
 
         private void OnEditorFocus()
         {
@@ -903,7 +918,7 @@ namespace RoslynPad.UI
                 _liveModeTimer?.Change(MainViewModel.Settings.LiveModeDelayMs, Timeout.Infinite);
             }
 
-            var task = UpdatePackages();
+            UpdatePackages();
         }
     }
 }

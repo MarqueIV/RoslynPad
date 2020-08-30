@@ -363,7 +363,7 @@ namespace RoslynPad.Runtime
         protected static bool IsScriptMethod(StackFrame stackFrame)
         {
             return stackFrame.GetMethod()?.DeclaringType?.
-                   Assembly.FullName.StartsWith("RoslynPad-", StringComparison.Ordinal) == true;
+                   Assembly.FullName.StartsWith("rp-", StringComparison.Ordinal) == true;
         }
 
         private void InitializeEnumerableHeaderOnly(string? headerPrefix, IEnumerable e)
@@ -518,12 +518,32 @@ namespace RoslynPad.Runtime
     }
 
     [DataContract]
+    internal class ProgressResultObject: ResultObject
+    {
+        // for serialization
+        // ReSharper disable once UnusedMember.Local
+        private ProgressResultObject()
+        {
+        }
+
+        private ProgressResultObject(double? progress)
+        {
+            Progress = progress;
+        }
+
+        public static ProgressResultObject Create(double? progress) => new ProgressResultObject(progress);
+
+        [DataMember(Name = "p")]
+        public double? Progress { get; private set; }
+    }
+
+    [DataContract]
     [SuppressMessage("ReSharper", "AutoPropertyCanBeMadeGetOnly.Local")]
     internal class CompilationErrorResultObject : IResultObject
     {
         // for serialization
         // ReSharper disable once UnusedMember.Local
-        private CompilationErrorResultObject()
+        protected CompilationErrorResultObject()
         {
             ErrorCode = string.Empty;
             Severity = string.Empty;
@@ -559,5 +579,26 @@ namespace RoslynPad.Runtime
         string? IResultObject.Value => ToString();
 
         public void WriteTo(StringBuilder builder) => builder.Append(ToString());
+    }
+
+    internal class RestoreResultObject : IResultObject
+    {
+        private readonly string? _value;
+
+        public RestoreResultObject(string message, string severity, string? value = null)
+        {
+            Message = message;
+            Severity = severity;
+            _value = value;
+        }
+
+        public string Message { get; }
+        public string Severity { get; }
+        public string Value => _value ?? Message;
+
+        public void WriteTo(StringBuilder builder)
+        {
+            builder.Append(Value);
+        }
     }
 }

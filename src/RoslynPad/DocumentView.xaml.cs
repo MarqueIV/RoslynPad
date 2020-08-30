@@ -20,8 +20,8 @@ namespace RoslynPad
 {
     public partial class DocumentView : IDisposable
     {
-        private readonly SynchronizationContext _syncContext;
-        private readonly ErrorMargin _errorMargin;
+        private readonly SynchronizationContext? _syncContext;
+        private readonly MarkerMargin _errorMargin;
         private OpenDocumentViewModel _viewModel;
         private IResultObject? _contextMenuResultObject;
 
@@ -31,7 +31,7 @@ namespace RoslynPad
         {
             InitializeComponent();
 
-            _errorMargin = new ErrorMargin { Visibility = Visibility.Collapsed, MarkerImage = TryFindResource("ExceptionMarker") as ImageSource, Width = 10 };
+            _errorMargin = new MarkerMargin { Visibility = Visibility.Collapsed, MarkerImage = TryFindResource("ExceptionMarker") as ImageSource, Width = 10 };
             Editor.TextArea.LeftMargins.Insert(0, _errorMargin);
             Editor.PreviewMouseWheel += EditorOnPreviewMouseWheel;
             Editor.TextArea.Caret.PositionChanged += CaretOnPositionChanged;
@@ -41,7 +41,7 @@ namespace RoslynPad
             DataContextChanged += OnDataContextChanged;
         }
 
-        private void CaretOnPositionChanged(object sender, EventArgs eventArgs)
+        private void CaretOnPositionChanged(object? sender, EventArgs eventArgs)
         {
             Ln.Text = Editor.TextArea.Caret.Line.ToString();
             Col.Text = Editor.TextArea.Caret.Column.ToString();
@@ -115,7 +115,7 @@ namespace RoslynPad
         {
             _viewModel.ResultsAvailable -= ResultsAvailable;
 
-            _syncContext.Post(o => ResultPaneRow.Height = new GridLength(1, GridUnitType.Star), null);
+            _syncContext?.Post(o => ResultPaneRow.Height = new GridLength(1, GridUnitType.Star), null);
         }
 
         private void OnError(ExceptionResultObject? e)

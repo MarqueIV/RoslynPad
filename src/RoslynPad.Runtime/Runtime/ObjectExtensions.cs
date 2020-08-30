@@ -43,7 +43,7 @@ namespace RoslynPad.Runtime
             return enumerable;
         }
 
-        internal static event Action<DumpData> Dumped;
+        internal static event Action<DumpData>? Dumped;
     }
 
     internal struct DumpData
@@ -62,7 +62,7 @@ namespace RoslynPad.Runtime
 
     internal struct DumpQuotas
     {
-        internal const int DefaultMaxDepth = 5;
+        internal const int DefaultMaxDepth = 4;
         internal const int DefaultMaxExpandedDepth = 1;
         internal const int DefaultMaxStringLength = 10000;
         internal const int DefaultMaxEnumerableLength = 10000;

@@ -12,7 +12,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Input;
 using ImageSource = Avalonia.Media.Drawing;
-using ModifierKeys = Avalonia.Input.InputModifiers;
+using ModifierKeys = Avalonia.Input.KeyModifiers;
 using TextCompositionEventArgs = Avalonia.Input.TextInputEventArgs;
 using RoutingStrategy = Avalonia.Interactivity.RoutingStrategies;
 #else
@@ -133,7 +133,7 @@ namespace RoslynPad.Editor
             }
         }
 
-        private async void CaretOnPositionChanged(object sender, EventArgs eventArgs)
+        private async void CaretOnPositionChanged(object? sender, EventArgs eventArgs)
         {
             if (_roslynHost == null || _documentId == null || _braceMatcherHighlighter == null)
             {
@@ -244,7 +244,13 @@ namespace RoslynPad.Editor
                     continue;
                 }
 
-                var marker = _textMarkerService.TryCreate(diagnosticData.TextSpan.Start, diagnosticData.TextSpan.Length);
+                var span = diagnosticData.GetTextSpan();
+                if (span == null)
+                {
+                    continue;
+                }
+
+                var marker = _textMarkerService.TryCreate(span.Value.Start, span.Value.Length);
                 if (marker != null)
                 {
                     marker.Tag = args.Id;

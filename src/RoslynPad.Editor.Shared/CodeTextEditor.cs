@@ -17,11 +17,11 @@ using AvaloniaEdit.Editing;
 using AvaloniaEdit.Highlighting;
 using Brush = Avalonia.Media.IBrush;
 using MouseEventArgs = Avalonia.Input.PointerEventArgs;
-using ModifierKeys = Avalonia.Input.InputModifiers;
 using TextCompositionEventArgs = Avalonia.Input.TextInputEventArgs;
 using RoutingStrategy = Avalonia.Interactivity.RoutingStrategies;
 using CommandBinding = AvaloniaEdit.RoutedCommandBinding;
 using AvalonEditCommands = AvaloniaEdit.AvaloniaEditCommands;
+using ModifierKeys = Avalonia.Input.KeyModifiers;
 #else
 using System.Windows;
 using System.Windows.Controls;
@@ -148,12 +148,12 @@ namespace RoslynPad.Editor
             remove => RemoveHandler(ToolTipRequestEvent, value);
         }
 
-        private void OnVisualLinesChanged(object sender, EventArgs e)
+        private void OnVisualLinesChanged(object? sender, EventArgs e)
         {
             _toolTip?.Close(this);
         }
 
-        private void OnMouseHoverStopped(object sender, MouseEventArgs e)
+        private void OnMouseHoverStopped(object? sender, MouseEventArgs e)
         {
             if (_toolTip != null)
             {
@@ -297,7 +297,7 @@ namespace RoslynPad.Editor
                     _insightWindow = new OverloadInsightWindow(TextArea)
                     {
                         Provider = results.OverloadProvider,
-                        Background = CompletionBackground,
+                        //Background = CompletionBackground,
                     };
 
                     InitializeInsightWindow();
@@ -339,7 +339,14 @@ namespace RoslynPad.Editor
                     data.Add(completion);
                 }
 
-                _completionWindow.CompletionList.SelectedItem = selected;
+                try
+                {
+                    _completionWindow.CompletionList.SelectedItem = selected;
+                }
+                catch (Exception)
+                {
+                    // TODO-AV: Fix this in AvaloniaEdit
+                }
 
                 _completionWindow.Closed += (o, args) => { _completionWindow = null; };
                 _completionWindow.Show();
@@ -354,9 +361,9 @@ namespace RoslynPad.Editor
         {
             if (args.Text.Length > 0 && _completionWindow != null)
             {
-                if (!char.IsLetterOrDigit(args.Text[0]))
+                if (!IsCharIdentifier(args.Text[0]))
                 {
-                    // Whenever a non-letter is typed while the completion window is open,
+                    // Whenever no identifier letter is typed while the completion window is open,
                     // insert the currently selected element.
                     _completionWindow.CompletionList.RequestInsertion(args);
                 }
@@ -364,7 +371,15 @@ namespace RoslynPad.Editor
             // Do not set e.Handled=true.
             // We still want to insert the character that was typed.
         }
-
+        /// <summary>
+        /// Checks if a provided char is a well-known identifier
+        /// </summary>
+        /// <param name="c">The charcater to check</param>
+        /// <returns><c>true</c> if <paramref name="c"/> is a well-known identifier.</returns>
+        private bool IsCharIdentifier(char c)
+        {
+            return char.IsLetterOrDigit(c) || c == '_';
+        }
         /// <summary>
         /// Gets the document used for code completion, can be overridden to provide a custom document
         /// </summary>

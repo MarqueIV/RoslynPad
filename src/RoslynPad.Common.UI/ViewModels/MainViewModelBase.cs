@@ -6,7 +6,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
@@ -26,18 +25,15 @@ namespace RoslynPad.UI
         private static readonly string _currentVersionVariant = "";
 
         public const string NuGetPathVariableName = "$NuGet";
-        private const string ConfigFileName = "RoslynPad.json";
 
         private OpenDocumentViewModel? _currentOpenDocument;
         private bool _hasUpdate;
         private double _editorFontSize;
         private string? _searchText;
         private bool _isWithinSearchResults;
-        private string _documentPath;
         private bool _isInitialized;
         private DocumentViewModel _documentRoot;
         private DocumentWatcher _documentWatcher;
-        private ImmutableArray<MetadataReference> _defaultReferences;
 
         public IApplicationSettings Settings { get; }
         public DocumentViewModel DocumentRoot
@@ -66,7 +62,7 @@ namespace RoslynPad.UI
             _commands = commands;
             _documentFileWatcher = documentFileWatcher;
 
-            settings.LoadFrom(Path.Combine(GetDefaultDocumentPath(), ConfigFileName));
+            settings.LoadDefault();
             Settings = settings;
 
             _telemetryProvider.Initialize(_currentVersion.ToString(), settings);
@@ -240,52 +236,16 @@ namespace RoslynPad.UI
         private DocumentViewModel CreateDocumentRoot()
         {
             _documentWatcher?.Dispose();
-            var root = DocumentViewModel.CreateRoot(GetUserDocumentPath());
+            var root = DocumentViewModel.CreateRoot(Settings.EffectiveDocumentPath);
             _documentWatcher = new DocumentWatcher(_documentFileWatcher, root);
             return root;
-        }
-
-        private string GetUserDocumentPath()
-        {
-            if (_documentPath == null)
-            {
-
-                var userDefinedPath = Settings.DocumentPath;
-                _documentPath = !string.IsNullOrEmpty(userDefinedPath) && Directory.Exists(userDefinedPath)
-                    ? userDefinedPath
-                    : GetDefaultDocumentPath();
-            }
-
-            return _documentPath;
-        }
-
-        private string GetDefaultDocumentPath()
-        {
-            string? documentsPath = null;
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            }
-            else // Unix or Mac
-            {
-                documentsPath = Environment.GetEnvironmentVariable("HOME");
-            }
-
-            if (string.IsNullOrEmpty(documentsPath))
-            {
-                documentsPath = "/";
-                _telemetryProvider.ReportError(new InvalidOperationException("Unable to locate the user documents folder; Using root"));
-            }
-
-            return Path.Combine(documentsPath, "RoslynPad");
         }
 
         public void EditUserDocumentPath()
         {
             var dialog = _serviceProvider.GetService<IFolderBrowserDialog>();
             dialog.ShowEditBox = true;
-            dialog.SelectedPath = GetUserDocumentPath();
+            dialog.SelectedPath = Settings.EffectiveDocumentPath;
 
             if (dialog.Show() == true)
             {
@@ -342,6 +302,7 @@ namespace RoslynPad.UI
                 openDocument = GetOpenDocumentViewModel(document);
                 OpenDocuments.Add(openDocument);
             }
+
             CurrentOpenDocument = openDocument;
         }
 
@@ -559,57 +520,57 @@ namespace RoslynPad.UI
                     await SearchInFile(document, regex).ConfigureAwait(false);
                 }
             }
-        }
 
-        private bool SearchDocumentName(DocumentViewModel document)
-        {
-            return document.Name.IndexOf(SearchText, StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private Regex? CreateSearchRegex()
-        {
-            try
+            bool SearchDocumentName(DocumentViewModel document)
             {
-                var regex = new Regex(SearchText, RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.IgnoreCase, TimeSpan.FromSeconds(5));
-
-                ClearError(nameof(SearchText), "Regex");
-
-                return regex;
+                return document.Name.IndexOf(SearchText!, StringComparison.OrdinalIgnoreCase) >= 0;
             }
-            catch (ArgumentException)
+
+            Regex? CreateSearchRegex()
             {
-                SetError(nameof(SearchText), "Regex", "Invalid regular expression");
-
-                return null;
-            }
-        }
-
-        private async Task SearchInFile(DocumentViewModel document, Regex? regex)
-        {
-            // a regex can span many lines so we need to load the entire file;
-            // otherwise, search line-by-line
-
-            if (regex != null)
-            {
-                var documentText = await IOUtilities.ReadAllTextAsync(document.Path).ConfigureAwait(false);
                 try
                 {
-                    document.IsSearchMatch = regex.IsMatch(documentText);
+                    var regex = new Regex(SearchText, RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.IgnoreCase, TimeSpan.FromSeconds(5));
+
+                    ClearError(nameof(SearchText), "Regex");
+
+                    return regex;
                 }
-                catch (RegexMatchTimeoutException)
+                catch (ArgumentException)
                 {
-                    document.IsSearchMatch = false;
+                    SetError(nameof(SearchText), "Regex", "Invalid regular expression");
+
+                    return null;
                 }
             }
-            else
+
+            async Task SearchInFile(DocumentViewModel document, Regex? regex)
             {
-                // need IAsyncEnumerable here, but for now just push it to the thread-pool
-                await Task.Run(() =>
+                // a regex can span many lines so we need to load the entire file;
+                // otherwise, search line-by-line
+
+                if (regex != null)
                 {
-                    var lines = IOUtilities.ReadLines(document.Path);
-                    document.IsSearchMatch = lines.Any(line =>
-                        line.IndexOf(SearchText, StringComparison.OrdinalIgnoreCase) >= 0);
-                }).ConfigureAwait(false);
+                    var documentText = await IOUtilities.ReadAllTextAsync(document.Path).ConfigureAwait(false);
+                    try
+                    {
+                        document.IsSearchMatch = regex.IsMatch(documentText);
+                    }
+                    catch (RegexMatchTimeoutException)
+                    {
+                        document.IsSearchMatch = false;
+                    }
+                }
+                else
+                {
+                    // need IAsyncEnumerable here, but for now just push it to the thread-pool
+                    await Task.Run(() =>
+                    {
+                        var lines = IOUtilities.ReadLines(document.Path);
+                        document.IsSearchMatch = lines.Any(line =>
+                            line.IndexOf(SearchText!, StringComparison.OrdinalIgnoreCase) >= 0);
+                    }).ConfigureAwait(false);
+                }
             }
         }
 
@@ -664,19 +625,6 @@ namespace RoslynPad.UI
 
         public IDelegateCommand ClearSearchCommand => _commands.Create(ClearSearch);
 
-        public ImmutableArray<MetadataReference> DesktopReferences
-        {
-            get
-            {
-                if (_defaultReferences.IsDefault)
-                {
-                    _defaultReferences = RoslynHostReferences.DesktopDefault.GetReferences(RoslynHost.DocumentationProviderFactory);
-                }
-
-                return _defaultReferences;
-            }
-        }
-
         private void ClearSearch()
         {
             SearchText = null;
@@ -714,7 +662,7 @@ namespace RoslynPad.UI
                 var pathParts = data.Path.Substring(_documentRoot.Path.Length)
                     .Split(PathSeparators, StringSplitOptions.RemoveEmptyEntries);
 
-                var current = _documentRoot;
+                DocumentViewModel? current = _documentRoot;
 
                 for (var index = 0; index < pathParts.Length; index++)
                 {
@@ -737,9 +685,8 @@ namespace RoslynPad.UI
                             var currentPath = isLast && data.Type == DocumentFileChangeType.Renamed
                                 ? data.NewPath
                                 : Path.Combine(_documentRoot.Path, Path.Combine(pathParts.Take(index + 1).ToArray()));
-                            Debug.Assert(currentPath != null);
 
-                            var newDocument = DocumentViewModel.FromPath(currentPath);
+                            var newDocument = DocumentViewModel.FromPath(currentPath!);
                             if (!newDocument.IsAutoSave &&
                                 IsRelevantDocument(newDocument))
                             {
@@ -756,13 +703,15 @@ namespace RoslynPad.UI
                         switch (data.Type)
                         {
                             case DocumentFileChangeType.Renamed:
-                                Debug.Assert(data.NewPath != null);
-                                current.ChangePath(data.NewPath);
-                                // move it to the correct place
-                                parent.InternalChildren.Remove(current);
-                                if (IsRelevantDocument(current))
+                                if (data.NewPath != null)
                                 {
-                                    parent.AddChild(current);
+                                    current.ChangePath(data.NewPath);
+                                    // move it to the correct place
+                                    parent.InternalChildren.Remove(current);
+                                    if (IsRelevantDocument(current))
+                                    {
+                                        parent.AddChild(current);
+                                    }
                                 }
                                 break;
                             case DocumentFileChangeType.Deleted:

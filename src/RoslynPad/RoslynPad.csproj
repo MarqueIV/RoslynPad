@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
   <PropertyGroup>
-    <TargetFramework>netcoreapp3.0</TargetFramework>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
     <UseWPF>true</UseWPF>
     <OutputType>WinExe</OutputType>
     <ApplicationIcon>Resources\RoslynPad.ico</ApplicationIcon>
@@ -17,16 +17,30 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\RoslynPad.Common.UI\RoslynPad.Common.UI.csproj" />
-    <ProjectReference Include="..\RoslynPad.Hosting\RoslynPad.Hosting.csproj" />
     <ProjectReference Include="..\RoslynPad.Editor.Windows\RoslynPad.Editor.Windows.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="AvalonLibrary" Version="2.4.0" />
-    <PackageReference Include="Extended.Wpf.Toolkit" Version="2.9.0" NoWarn="NU1701" />
+    <PackageReference Include="Dirkster.AvalonDock" Version="4.0.0" />
     <PackageReference Include="Microsoft.ApplicationInsights" Version="2.8.1" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="3.1.6" />
     <PackageReference Include="Mono.Cecil" Version="0.10.1" />
     <PackageReference Include="System.Collections.Immutable" Version="1.5.0" />
     <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
     <PackageReference Include="Microsoft.DiaSymReader.Native" Version="1.7.0" />
   </ItemGroup>
+  <Target Name="UpdateAppSettings" AfterTargets="Build"
+          Condition=" '$(UpdateAppSettings)' == 'true' ">
+    <PropertyGroup>
+      <AppSettingsInputFile>$(MSBuildThisFileDirectory)\appsettings.json</AppSettingsInputFile>
+      <AppSettingsOutputFile>$(OutDir)\appsettings.json</AppSettingsOutputFile>
+      <AppSettingsOriginalString>"InstrumentationKey":  ""</AppSettingsOriginalString>
+      <AppSettingsReplaceString>"InstrumentationKey":  "$(RoslynPadTelemetryKey)"</AppSettingsReplaceString>
+    </PropertyGroup>
+    <WriteLinesToFile
+        File="$(AppSettingsOutputFile)"
+        Lines="$([System.IO.File]::ReadAllText($(AppSettingsInputFile)).Replace($(AppSettingsOriginalString), $(AppSettingsReplaceString)))"
+        Overwrite="true"
+        Encoding="Unicode"/>
+  </Target>
 </Project>

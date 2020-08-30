@@ -25,7 +25,7 @@ namespace RoslynPad.Roslyn
             }
         }
 
-        public override bool Equals(object other) => _inner.Equals(other);
+        public override bool Equals(object? other) => _inner.Equals(other);
 
         public override int GetHashCode() => _inner.GetHashCode();
 
@@ -42,10 +42,11 @@ namespace RoslynPad.Roslyn
                 _ => ImmutableArray.Create(_inner.ResolveMissingAssembly(definition, referenceIdentity))).FirstOrDefault();
         }
 
-        public override ImmutableArray<PortableExecutableReference> ResolveReference(string reference, string baseFilePath, MetadataReferenceProperties properties)
+        public override ImmutableArray<PortableExecutableReference> ResolveReference(string reference, string? baseFilePath, MetadataReferenceProperties properties)
         {
             // nuget references will be resolved externally
             if (reference.StartsWith("nuget:", StringComparison.InvariantCultureIgnoreCase) ||
+                reference.StartsWith("framework:", StringComparison.InvariantCultureIgnoreCase) ||
                 reference.StartsWith("$NuGet", StringComparison.InvariantCultureIgnoreCase))
             {
                 return _unresolved;
