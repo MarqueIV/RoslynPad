@@ -25,8 +25,22 @@ namespace RoslynPad
 
         private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
+            if(_viewModel is MainViewModel oldViewModel){
+                oldViewModel.EditorFontSizeChanged -= EditorFontSizeChanged;
+            }
+
             _viewModel = (MainViewModel)e.NewValue;
+
+            if(_viewModel is MainViewModel newViewModel){
+                newViewModel.EditorFontSizeChanged += EditorFontSizeChanged;
+                EditorFontSizeChanged(newViewModel.EditorFontSize);
+            }
         }
+
+        private void EditorFontSizeChanged(double fontSize) {
+            FontSize = fontSize;
+        }
+
 
         private void OnDocumentClick(object sender, MouseButtonEventArgs e)
         {

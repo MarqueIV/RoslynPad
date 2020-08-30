@@ -55,7 +55,10 @@ namespace RoslynPad
             }
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
             {
-                _viewModel.MainViewModel.EditorFontSize += args.Delta > 0 ? 1 : -1;
+                _viewModel.MainViewModel.EditorFontSize += args.Delta > 0
+                    ?  1
+                    : -1;
+
                 args.Handled = true;
             }
         }
@@ -71,7 +74,7 @@ namespace RoslynPad
             _viewModel.DocumentUpdated += (o, e) => Dispatcher.InvokeAsync(() => Editor.RefreshHighlighting());
 
             _viewModel.MainViewModel.EditorFontSizeChanged += OnEditorFontSizeChanged;
-            Editor.FontSize = _viewModel.MainViewModel.EditorFontSize;
+            OnEditorFontSizeChanged(_viewModel.MainViewModel.EditorFontSize);
 
             var documentText = await _viewModel.LoadText().ConfigureAwait(true);
 
@@ -134,7 +137,8 @@ namespace RoslynPad
 
         private void OnEditorFontSizeChanged(double fontSize)
         {
-            Editor.FontSize = fontSize;
+            Editor.FontSize     = fontSize;
+            ResultTree.FontSize = fontSize;
         }
 
         private void NuGetOnPackageInstalled(PackageData package)
@@ -167,12 +171,9 @@ namespace RoslynPad
             Dispatcher.InvokeAsync(() => Editor.Focus(), System.Windows.Threading.DispatcherPriority.Background);
         }
 
-        public void Dispose()
-        {
+        public void Dispose(){
             if (_viewModel?.MainViewModel != null)
-            {
                 _viewModel.MainViewModel.EditorFontSizeChanged -= OnEditorFontSizeChanged;
-            }
         }
 
         private void OnTreeViewKeyDown(object sender, KeyEventArgs e)
